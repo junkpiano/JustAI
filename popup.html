@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title id="title">Mini AI Tools</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1 id="header-title">Mini AI</h1>
+    <button id="open-settings" title="settings">⚙️</button>
+  </header>
+
+  <main>
+    <div class="buttons">
+      <button id="summarize">要約</button>
+      <button id="translate">翻訳</button>
+      <button id="generate">文章生成</button>
+    </div>
+
+    <div id="generate-area" class="card hidden">
+      <label id="label-gen-prompt">プロンプト</label>
+      <textarea id="gen-prompt" rows="4"></textarea>
+      <button id="run-generate">作成</button>
+    </div>
+
+    <div id="result" class="card"></div>
+  </main>
+
+  <dialog id="settings">
+    <h2 id="settings-title">設定</h2>
+    <label id="label-api-endpoint">APIエンドポイント</label>
+    <input id="api-endpoint" placeholder="https://api.openai.com/v1/chat/completions" />
+
+    <label id="label-api-key">OpenAI API Key</label>
+    <input id="api-key" type="password" placeholder="sk-..." />
+
+    <label id="label-model">モデル名</label>
+    <input id="model" placeholder="gpt-4o-mini" />
+
+    <label id="label-target-lang">言語</label>
+    <select id="target-lang">
+      <option value="ja">日本語 (ja)</option>
+      <option value="en">English (en)</option>
+      <option value="zh">中文 (zh)</option>
+      <option value="ko">한국어 (ko)</option>
+      <option value="es">Español (es)</option>
+      <option value="fr">Français (fr)</option>
+      <option value="de">Deutsch (de)</option>
+      <option value="ru">Русский (ru)</option>
+    </select>
+
+    <div class="row">
+      <button id="save">保存</button>
+      <button id="close-settings">閉じる</button>
+    </div>
+    <p class="note" id="note-storage">※キーはブラウザの拡張ストレージに暗号化なしで保存されます。自己責任でご利用ください。</p>
+  </dialog>
+
+  <script src="popup.js"></script>
+</body>
+</html>
