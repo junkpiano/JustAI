@@ -167,14 +167,21 @@ async function callOpenAI({ apiKey, model, system, messages, apiEndpoint }) {
     console.log(`Model: ${model}, Messages: ${messages.length}`);
     
     try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+
         const resp = await fetch(endpoint, {
             method: "POST",
             headers: {
                 "Authorization": `Bearer ${apiKey}`,
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "User-Agent": "Chrome-Extension"
             },
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            signal: controller.signal
         });
+        
+        clearTimeout(timeoutId);
 
         console.log(`API response status: ${resp.status}`);
 
@@ -213,10 +220,15 @@ async function callOpenAI({ apiKey, model, system, messages, apiEndpoint }) {
         
         return content.trim();
     } catch (error) {
-        // Handle network errors specifically
-        if (error.name === 'TypeError' && error.message.includes('fetch')) {
-            console.error("Network error details:", error);
-            throw new Error("Network error: Unable to connect to OpenAI API. Please check your internet connection and firewall settings.");
+        console.error("API call error:", error);
+        
+        // Handle specific error types
+        if (error.name === 'AbortError') {
+            throw new Error("Request timeout: API call took too long. Please try again.");
+        } else if (error.name === 'TypeError' && (error.message.includes('fetch') || error.message.includes('network'))) {
+            throw new Error("Network error: Unable to connect to OpenAI API. Check internet connection, firewall, or try a different API endpoint.");
+        } else if (error.message.includes('CORS')) {
+            throw new Error("CORS error: API endpoint may not support browser requests. Try using the official OpenAI API endpoint.");
         }
         
         // Re-throw other errors as-is
@@ -295,31 +307,49 @@ async function performBackgroundTranslation(tabId) {
             throw new Error("No text chunks found");
         }
 
-        // Use large batch size for maximum speed
-        const optimalBatchSize = Math.min(chunks.length, 50);
+        // Use larger batches to reduce API calls and avoid rate limits
+        const optimalBatchSize = Math.min(chunks.length, 25);
         const translatedChunks = [];
         
+        // Process batches sequentially with delay to respect rate limits
         for (let i = 0; i < chunks.length; i += optimalBatchSize) {
             const batch = chunks.slice(i, i + optimalBatchSize);
             const textsToTranslate = batch.map(chunk => chunk.text).join('\n---CHUNK_SEPARATOR---\n');
             
-            const translatedBatch = await callOpenAI({
-                apiKey, model, apiEndpoint,
-                system: `You are a professional translator. Translate each text chunk to ${targetLang}. Keep the same number of chunks separated by '---CHUNK_SEPARATOR---'. Preserve formatting and meaning.`,
-                messages: [
-                    { role: "user", content: `Translate each chunk to ${targetLang}:\n\n${textsToTranslate}` }
-                ]
-            });
-            
-            const translatedTexts = translatedBatch.split('---CHUNK_SEPARATOR---');
-            
-            // Match translated texts back to chunks
-            for (let j = 0; j < batch.length && j < translatedTexts.length; j++) {
-                translatedChunks.push({
-                    id: batch[j].id,
-                    text: batch[j].text, // Include original text for matching
-                    translatedText: translatedTexts[j].trim()
+            try {
+                const translatedBatch = await callOpenAI({
+                    apiKey, model, apiEndpoint,
+                    system: `Translate to ${targetLang}. Keep same chunk count, separated by '---CHUNK_SEPARATOR---'.`,
+                    messages: [
+                        { role: "user", content: textsToTranslate }
+                    ]
                 });
+                
+                const translatedTexts = translatedBatch.split('---CHUNK_SEPARATOR---');
+                
+                // Match translated texts back to chunks
+                for (let j = 0; j < batch.length && j < translatedTexts.length; j++) {
+                    translatedChunks.push({
+                        id: batch[j].id,
+                        text: batch[j].text,
+                        translatedText: translatedTexts[j].trim()
+                    });
+                }
+                
+                // Add delay between batches to respect rate limits (only if more batches remain)
+                if (i + optimalBatchSize < chunks.length) {
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
+                }
+                
+            } catch (error) {
+                if (error.message.includes('rate limit') || error.message.includes('429')) {
+                    // Exponential backoff for rate limit errors
+                    console.warn('Rate limit hit, waiting before retry...');
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // 5 second wait
+                    i -= optimalBatchSize; // Retry the same batch
+                    continue;
+                }
+                throw error; // Re-throw other errors
             }
         }
 
@@ -512,6 +542,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         
         sendResponse({ success: true, results: recentResults });
         return true;
+    } else if (message.type === "TEST_API_CONNECTION") {
+        // Manual API test trigger
+        testAPIConnection().then(() => {
+            sendResponse({ success: true });
+        }).catch(error => {
+            sendResponse({ success: false, error: error.message });
+        });
+        return true;
     }
 });
 
@@ -568,7 +606,141 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     }
 });
 
+// Test function to debug network issues
+async function testAPIConnection() {
+    try {
+        console.log("Testing API connection...");
+        const config = await loadConfig();
+        
+        if (!config.apiKey) {
+            console.error("No API key configured");
+            return;
+        }
+        
+        const testEndpoint = config.apiEndpoint || "https://api.openai.com/v1/chat/completions";
+        console.log("Testing endpoint:", testEndpoint);
+        
+        const response = await callOpenAI({
+            apiKey: config.apiKey,
+            model: config.model || "gpt-4o-mini",
+            messages: [{ role: "user", content: "Hello" }]
+        });
+        
+        console.log("API test successful:", response);
+    } catch (error) {
+        console.error("API test failed:", error);
+    }
+}
+
+// --- Context Menu Setup ---
+function createContextMenus() {
+    // Remove existing context menus first
+    chrome.contextMenus.removeAll(() => {
+        // Create context menus for selected text
+        chrome.contextMenus.create({
+            id: "ai-tools-separator",
+            type: "separator",
+            contexts: ["selection"]
+        });
+        
+        chrome.contextMenus.create({
+            id: "ai-tools-parent",
+            title: "🤖 AI Tools",
+            contexts: ["selection"]
+        });
+        
+        chrome.contextMenus.create({
+            id: "summarize-selection",
+            parentId: "ai-tools-parent",
+            title: "📄 要約 (Summarize)",
+            contexts: ["selection"]
+        });
+        
+        chrome.contextMenus.create({
+            id: "translate-selection", 
+            parentId: "ai-tools-parent",
+            title: "🌐 翻訳 (Translate)",
+            contexts: ["selection"]
+        });
+        
+        chrome.contextMenus.create({
+            id: "generate-selection",
+            parentId: "ai-tools-parent", 
+            title: "✨ 文章生成 (Generate)",
+            contexts: ["selection"]
+        });
+        
+        // Add separator for page-level actions
+        chrome.contextMenus.create({
+            id: "ai-tools-page-separator",
+            type: "separator",
+            contexts: ["page"]
+        });
+        
+        chrome.contextMenus.create({
+            id: "ai-tools-page-parent",
+            title: "🤖 AI Tools (Page)",
+            contexts: ["page"]
+        });
+        
+        chrome.contextMenus.create({
+            id: "summarize-page",
+            parentId: "ai-tools-page-parent",
+            title: "📄 ページを要約",
+            contexts: ["page"]
+        });
+        
+        chrome.contextMenus.create({
+            id: "translate-page",
+            parentId: "ai-tools-page-parent", 
+            title: "🌐 ページを翻訳",
+            contexts: ["page"]
+        });
+        
+        console.log("Context menus created");
+    });
+}
+
+// Handle context menu clicks
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    if (!tab?.id) return;
+    
+    console.log(`Context menu clicked: ${info.menuItemId}`);
+    
+    try {
+        switch (info.menuItemId) {
+            case "summarize-selection":
+            case "summarize-page":
+                await performBackgroundSummarize(tab.id);
+                break;
+                
+            case "translate-selection":
+            case "translate-page":
+                await performBackgroundTranslation(tab.id);
+                break;
+                
+            case "generate-selection":
+                // For generation, we need a prompt - show notification to use the popup
+                await showNotification(
+                    'Text Generation', 
+                    'Please use the extension popup to enter a prompt for text generation.', 
+                    'info'
+                );
+                break;
+        }
+    } catch (error) {
+        console.error('Context menu action failed:', error);
+        await showNotification('Error', `Action failed: ${error.message}`, 'error');
+    }
+});
+
 // Extension initialization
 chrome.runtime.onInstalled.addListener(async () => {
     await showNotification('Mini AI Tools', 'Extension ready for use', 'info');
+    
+    // Create context menus
+    createContextMenus();
+    
+    // Test API connection on install
+    setTimeout(testAPIConnection, 2000);
 });
